@@ -1,9 +1,9 @@
 import os
 import streamlit as st
-from langchain_qroq import ChatGroq
+from langchain_groq import ChatGroq
 
 class GroqLLM:
-    def __init__(self, user_control_input):
+    def __init__(self, user_control_input): 
         self.user_control_input = user_control_input
 
     def get_llm_model(self):
