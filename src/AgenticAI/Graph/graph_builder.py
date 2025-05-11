@@ -1,12 +1,33 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import  tools_condition, ToolNode
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import SystemMessage, HumanMessage
+from langgraph.constants import Send
+
 from src.AgenticAI.State.state import State
 from src.AgenticAI.Node.basic_chatbot_node import BasicChatbotNode
 from src.AgenticAI.Node.chatbot_with_Tool_node import ChatBotWithToolNode
 from src.AgenticAI.Tool.search_tool import get_tools, create_tool_node
 
-from langgraph.graph import StateGraph, START,END
+from typing import List
+
+
+# === Chatbot-specific imports ===
+from src.AgenticAI.State.state import State as ChatState
+from src.AgenticAI.Node.basic_chatbot_node import BasicChatbotNode
+from src.AgenticAI.Node.chatbot_with_Tool_node import ChatBotWithToolNode
+from src.AgenticAI.Tool.search_tool import get_tools, create_tool_node
+
+
+# === Travel Itinerary-specific imports ===
+from src.AgenticAI.State.travel_state import TravelItinerary, TravelState, WorkerState
+from src.AgenticAI.Tool.travel.evaluator import Evaluator
+from src.AgenticAI.Tool.travel.human_review import HumanReview
+from src.AgenticAI.Tool.travel.synthesizer import Synthesizer
+from src.AgenticAI.Tool.travel.workers import Worker
+from src.AgenticAI.Tool.travel.orchestrator import TravelOrchestrator
+
+
 class GraphBuilder:
     def __init__(self, model):
         self.llm = model    
@@ -54,7 +75,65 @@ class GraphBuilder:
         self.graph_builder.add_conditional_edges("chatbot", tools_condition)
         self.graph_builder.add_edge("tools","chatbot")
 
-    
+    # === TRAVEL ITINERARY ===
+    def build_travel_itinerary_graph(self):
+        """Builds the complete travel itinerary workflow graph"""
+        print("\n==== BUILDING TRAVEL ITINERARY GRAPH ====")
+        self.graph_builder = StateGraph(TravelState)
+
+        # Initialize components
+        worker = Worker(self.llm)
+        evaluator = Evaluator()
+        human = HumanReview()
+        synth = Synthesizer()
+        planner = self.llm.with_structured_output(TravelItinerary)
+        orchestrator = TravelOrchestrator(planner=planner, state={})
+
+        # Add nodes
+        self.graph_builder.add_node("orchestrator", orchestrator.orchestrate)
+        self.graph_builder.add_node("llm_call", worker.generate_section)
+        self.graph_builder.add_node("evaluator", evaluator.evaluate)
+        self.graph_builder.add_node("in_human", human.review)
+        self.graph_builder.add_node("synthesizer", synth.synthesize)
+
+        # Worker assignment function using the Send API
+        def assign_workers(state: TravelState):
+            """Creates worker tasks for each section using Send"""
+            return [Send("llm_call", {"section": s}) for s in state["sections"]]
+
+        # Set up the graph edges
+        self.graph_builder.add_edge(START, "orchestrator")
+        self.graph_builder.add_conditional_edges(
+            "orchestrator", 
+            assign_workers, 
+            ["llm_call"]
+        )
+        self.graph_builder.add_edge("llm_call", "evaluator")
+
+        # Conditional routing based on evaluation
+        def evaluation_router(state: TravelState):
+            return "in_human" if state.get("evaluator_passed", False) else "orchestrator"
+                
+        self.graph_builder.add_conditional_edges(
+            "evaluator", 
+            evaluation_router,
+            {"orchestrator": "orchestrator", "in_human": "in_human"}
+        )
+        
+        # Human review conditional routing
+        def human_review_router(state: TravelState):
+            return "orchestrator" if state.get("next_step") == "orchestrator" else "synthesizer"
+                
+        self.graph_builder.add_conditional_edges(
+            "in_human",
+            human_review_router,
+            {"orchestrator": "orchestrator", "synthesizer": "synthesizer"}
+        )
+
+        # Final edge
+        self.graph_builder.add_edge("synthesizer", END)
+        print("Travel itinerary graph built successfully.")
+
 
     def setup_graph(self, usecase: str):
         """
@@ -63,9 +142,13 @@ class GraphBuilder:
         based on the provided use case string. It initializes the graph 
         builder and constructs the appropriate graph.
         """
-        if usecase == "Basic Chatbot":
+        if usecase == "Basic Chatbot": 
             self.basic_chatbot_build_graph()
         if usecase == "Chatbot with Tools":
             self.chatbot_with_tools_build_graph() 
+        if usecase == "Travel Planner":
+            self.build_travel_itinerary_graph()
+            print("Graph built successfully for Travel Planner.")
         return self.graph_builder.compile()
     
+
